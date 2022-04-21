@@ -1,6 +1,6 @@
 import aiohttp, json, re, os, uuid, math, urllib, threading, re
 import http.cookiejar as HC
-from .shaonianzhentan import fetch_info
+from .shaonianzhentan import fetch_info, fetch_json
 from homeassistant.helpers.network import get_url
 
 # 全局请求头
@@ -18,15 +18,12 @@ class ApiMusic():
         self.media = media
         # 网易云音乐接口地址
         self.api_url = config.get("api_url", '').strip('/')
-        self.qq_api_url = config.get('qq_api_url', '').strip('/')
-        self.xmly_api_url = config.get('xmly_api_url', '').strip('/')
-        # 网易云音乐用户ID
-        self.uid = str(config.get("uid", ''))
+        self.find_api_url = config.get('find_api_url', '').strip('/')
         # 用户名和密码        
         self.user = str(config.get("user", ''))
         self.password = str(config.get("password", ''))
 
-    async def login(self):
+    async def login(self, login_callback):
         # 如果有用户名密码，则登录
         if self.user != '' and self.password != '':
             self.log('登录操作', '开始登录')
@@ -39,11 +36,15 @@ class ApiMusic():
                 res = await self.get('/login/cellphone?phone=' + self.user + '&password=' + self.password)
             # 登录成功
             if res is not None and res['code'] == 200:
-                self.uid = str(res['account']['id'])
                 self.log('登录成功')
+                login_callback(str(res['account']['id']))
+                return
             else:
+                print(res)
                 self.media.notify("网易云登录失败，请检查账号密码是否错误。如果确定没错，请检查接口是否正常。", "error")
                 self.log('登录失败', res)
+
+        login_callback('')
 
     def log(self, name, value = ''):
         self.media.log('【ApiMusic接口】%s：%s',name,value)
@@ -73,7 +74,7 @@ class ApiMusic():
 
                     result = await resp.json()
         except Exception as e:
-            self.media.notify('接口出现异常，请确定音乐接口服务是否正常运行', "error")
+            self.media.notify(f'【接口出现异常】【{link}】{e}', "error")
             self.log('【接口出现异常】' + link, e)
         return result
     
@@ -95,13 +96,6 @@ class ApiMusic():
             self.log('【接口出现异常】' + url, e)
         return result
 
-    # QQ音乐
-    async def qq_get(self, url):
-        if self.qq_api_url != '':
-            res = await self.proxy_get(self.qq_api_url + url)
-            if res is not None and res['response']["code"] == 0:
-                return res['response']
-
     ###################### 获取音乐播放URL ######################    
     async def get_http_code(self, url):
         connector = aiohttp.TCPConnector(verify_ssl=False)
@@ -109,54 +103,97 @@ class ApiMusic():
             async with session.get(url) as response:
                 return response.status
 
-    # 获取音乐URL
+    # 获取163音乐地址，确保获取到了mp3 真实地址.如果收费地址返回搜索的信息
+    async def get_music_real_url(self,id,musicInfo):
+        try:
+            obj = await self.get("/song/url?id=" + str(id))
+            if obj is not None and obj['data'][0]['url'] != '' and obj['data'][0]['fee'] == 0 :
+                musicInfo['url'] = obj['data'][0]['url']
+                musicInfo['type'] = 'url'
+                return musicInfo
+            else:
+                # 如果配置了全网音乐搜索，则直接使用
+                if self.find_api_url != '':
+                    # 如果含有特殊字符，则直接使用名称搜索
+                    searchObj = re.search(r'\(|（|：|:《', musicInfo['song'] , re.M|re.I)
+                    if searchObj:
+                        keywords = musicInfo['song'] 
+                    else:
+                        keywords = musicInfo['song']  + ' - '+ musicInfo['singer'] 
+                    obj = await fetch_json(self.find_api_url + "/api/search?key=" + keywords)
+                    if obj is not None and obj['code'] == 0:
+                        item = obj['data']
+                        source = item['source']
+                        # "id": item['id'], 此处使用旧ID，
+                        play_item = {
+                            "search_source": source,
+                            "id": id,
+                            "name": item['name'],
+                            "album": item['album'],
+                            "image": item['cover'],
+                            "duration": item['duration'],
+                            "url": item['purl'],
+                            "song": item['name'],
+                            "singer": item['singer']
+                        }
+                        # 判断来源是否互联网
+                        if source == 'internet':
+                            play_item['type'] = 'url'
+                            self.log('【全网搜索音乐2】' + item['purl'])
+                        musicInfo = play_item
+                        return musicInfo
+                return musicInfo
+        except Exception as e:
+            self.log('【获取获取163音乐地址异常】' + id, e)
+        return musicInfo
+    
+    # 获取音乐URL fee 值 为0的时候，是免费歌曲，链接20分钟有效。1可以试听30s ，0: 免费或无版权 https://github.com/Binaryify/NeteaseCloudMusicApi/blob/9f5f178d685ac8743dc6e4fe3fc54d61a2e24e7d/docs/README.md
+    # 1: VIP 歌曲
+    # 4: 购买专辑
+    # 8: 非会员可免费播放低音质，会员可播放高音质及下载
+    # fee 为 1 或 8 的歌曲均可单独购买 2 元单曲
     async def get_song_url(self, id):
-        obj = await self.get("/song/url?id=" + str(id))
-        return obj['data'][0]['url']
-
-    # 获取QQ音乐URL
-    async def get_qq_song_url(self, id):
-        res = await self.qq_get("/getMusicVKey?songmid=" + str(id))
-        if res is not None and len(res['playLists']) > 0:
-            url = res['playLists'][0]
-            http_code = await self.get_http_code(url)
-            if http_code == 403:
-                self.media.notify("😂只有尊贵的QQ音乐绿砖会员才能收听", "error")
+        try:
+            obj = await self.get("/song/url?id=" + str(id))
+            if obj is not None and obj['data'][0]['url'] != '' and obj['data'][0]['fee'] == 0 :
+                return obj['data'][0]['url']
+            else:
                 return None
-                # 如果没有权限，说明这个只有尊贵的QQ音乐绿砖会员才能收听
-                # 我木有钱，只想白嫖，所以调用这位老哥的开放接口
-                vip_url = 'https://api.qq.jsososo.com/song/url?id=' + str(id)
-                print(f"使用白嫖接口：{vip_url}")
-                res = await self.proxy_get(vip_url)
-                return res['data']
-            return url
-
-    # 获取重写向后的地址
-    async def get_redirect_url(self, url):
-        # 请求网页
-        res = await fetch_info(url)
-        result_url = res['url']
-        if result_url == 'https://music.163.com/404':
+        except Exception as e:
+            self.log('【获取音乐URL异常】' + id, e)
+        return None
+    
+    # 获取音乐地址
+    async def get_music_url(self, url, songName, singerName):
+        # 请求网页,跳转真实播放地址
+        try:
+            if url is not None:
+                res = await fetch_info(url)
+                result_url = res['url']
+                self.log('【获取音乐地址】' + str(url) + '跳转后地址=' + str(result_url))
+        except Exception as e:
+            self.log('【获取音乐URL请求网页异常】' + str(url), e)
+       
+        # http://music.163.com/song/media/outer/url?id=158027.mp3 现在返回错误链接 https://music.163.com/#/song/media/outer/url?id=158932.mp3
+        if url is None or result_url is None or result_url == '' or result_url == 'https://music.163.com/404' or result_url == 'http://music.163.com/404' or result_url.startswith('https://music.163.com/#/song/media/outer/url') or result_url.startswith('http://music.163.com/#/song/media/outer/url'):
+            # 全网搜索音乐
+            if self.find_api_url != '':
+                # 如果含有特殊字符，则直接使用名称搜索
+                searchObj = re.search(r'\(|（|：|:《', songName, re.M|re.I)
+                if searchObj:
+                    keywords = songName
+                else:
+                    keywords = songName + ' - '+ singerName
+                try:
+                    obj = await fetch_json(self.find_api_url + "/api/search?key=" + keywords)
+                    if obj is not None and obj['code'] == 0:
+                        self.log('【全网搜索音乐】' + obj['data']['purl'])
+                        return obj['data']['purl']
+                except Exception as e:
+                    self.log('【获取音乐URL请求网页异常2】' + str(searchObj), e)
+            # 居然没搜到，这不科学
             return None
         return result_url
-
-    # 进行咪咕搜索，可以播放周杰伦的歌歌
-    async def migu_search(self, songName, singerName):
-        try:
-            # 如果含有特殊字符，则直接使用名称搜索
-            searchObj = re.search(r'\(|（|：|:《', songName, re.M|re.I)
-            if searchObj:
-                keywords = songName
-            else:    
-                keywords = songName + ' - '+ singerName
-            
-            res = await self.proxy_get("http://m.music.migu.cn/migu/remoting/scr_search_tag?rows=10&type=2&keyword=" + urllib.parse.quote(keywords) + "&pgc=1")
-            
-            if 'musics' in res and len(res['musics']) > 0 and (songName in res['musics'][0]['songName'] or searchObj):
-                return res['musics'][0]['mp3']
-        except Exception as e:
-            print("在咪咕搜索时出现错误：", e)
-        return None
 
     ###################### 获取音乐播放URL ######################
 
@@ -182,6 +219,30 @@ class ApiMusic():
     # 音乐搜索
     async def search_music(self, name):
         _list = []
+        # 如果配置了全网音乐搜索，则直接使用
+        if self.find_api_url != '':
+            obj = await fetch_json(self.find_api_url + "/api/search?key=" + name)
+            if obj is not None and obj['code'] == 0:
+                item = obj['data']
+                source = item['source']
+                play_item = {
+                    "search_source": source,
+                    "id": item['id'],
+                    "name": item['name'],
+                    "album": item['album'],
+                    "image": item['cover'],
+                    "duration": item['duration'],
+                    "url": item['purl'],
+                    "song": item['name'],
+                    "singer": item['singer']
+                }
+                # 判断来源是否互联网
+                if source == 'internet':
+                    play_item['type'] = 'url'
+                    self.log('【全网搜索音乐2】' + item['purl'])
+                _list.append(play_item)
+                return _list
+
         # 搜索网易云音乐
         obj = await self.get('/search?keywords='+ name)
         if obj['code'] == 200:
@@ -199,29 +260,12 @@ class ApiMusic():
                     "singer": len(item['artists']) > 0 and item['artists'][0]['name'] or '未知'
                     }, songs)
                 _list.extend(list(_newlist))
-        # 搜索QQ音乐
-        res = await self.qq_get('/getSmartbox?key=' + name)
-        if res is not None:
-            songs = res['data']['song']
-            if songs['count'] > 0:
-                _newlist = map(lambda item: {
-                    "search_source": "QQ音乐",
-                    "id": int(item['id']),
-                    "mid": item['mid'],
-                    "name": item['name'],
-                    "album": "QQ音乐",
-                    "image": "http://p3.music.126.net/3TTjFNIrtcUzoMlB1D1fDA==/109951164969055590.jpg?param=300y300",
-                    "duration": 0,
-                    "type": "qq",
-                    "song": item['name'],
-                    "singer": item['singer']
-                    }, songs['itemlist'])
-                _list.extend(list(_newlist))
         # 搜索咪咕音乐
         migu_list = await self.search_migu(name)
         if migu_list is not None:
             _list.extend(migu_list)
         return _list
+
 
     async def search_ximalaya(self, name):
         _newlist = []
@@ -389,8 +433,8 @@ class ApiMusic():
 
     # 获取VIP音频链接
     async def get_ximalaya_vip_audio_url(self, id):
-        if self.xmly_api_url != '':
-            obj = await self.proxy_get(self.xmly_api_url + "/?id=" + str(id))
+        if self.find_api_url != '':
+            obj = await fetch_json(self.find_api_url + "/api/xmly?id=" + str(id))
             if obj is not None and obj['code'] == 0:
                 return obj['data']
 
@@ -491,7 +535,6 @@ class ApiMusic():
         return None
 
     async def play_news(self, name):
-        hass = self.hass
         leting_headers = {"uid":UID, "logid": UID, "token": ''}
         connector = aiohttp.TCPConnector(verify_ssl=False)
         async with aiohttp.ClientSession(connector=connector) as session:

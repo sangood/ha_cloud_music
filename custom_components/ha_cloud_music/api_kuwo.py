@@ -19,7 +19,7 @@ async def check_163_song_url( id, songName, singerName, url):
     # 请求网页
     res = await fetch_info(url)
     result_url = res['url']
-    if result_url == 'https://music.163.com/404':
+    if result_url == 'https://music.163.com/404' or result_url == 'http://music.163.com/404':
         return None
     return url
     #return await search_kuwo_music_by_keyword(id, songName, singerName)

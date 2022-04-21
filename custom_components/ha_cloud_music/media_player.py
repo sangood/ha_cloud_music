@@ -10,8 +10,6 @@ from homeassistant.const import (STATE_IDLE, STATE_PAUSED, STATE_PLAYING, STATE_
 from homeassistant.components.media_player.errors import BrowseError
 from .browse_media import build_item_response, library_payload
 
-from .api_kuwo import check_163_song_url, search_kuwo_music_by_keyword
-
 # SUPPORT_TURN_ON | SUPPORT_TURN_OFF | 
 SUPPORT_FEATURES = SUPPORT_PAUSE | SUPPORT_VOLUME_SET | SUPPORT_VOLUME_MUTE | SUPPORT_SELECT_SOUND_MODE | \
     SUPPORT_PLAY_MEDIA | SUPPORT_PLAY | SUPPORT_NEXT_TRACK | \
@@ -36,20 +34,18 @@ from .source_web import MediaPlayerWEB
 from .source_vlc import MediaPlayerVLC
 from .source_mpd import MediaPlayerMPD
 from .source_other import MediaPlayerOther
+from .source_windows import MediaPlayerWindows
 
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    # 显示模式 全屏：fullscreen
-    show_mode = config.get("show_mode", "default")
-    
+
+async def async_setup_entry(hass, entry, async_add_entities) -> None:
+    options = entry.options
+    config = dict(entry.data, **options)
     # TTS相关配置
-    tts_before_message = config.get("tts_before_message", '')
-    tts_after_message = config.get("tts_after_message", '')
-    tts_mode = config.get("tts_mode", 4)
-
-    #### （启用/禁用）配置 #### 
-
+    tts_before_message = options.get("tts_before_message", '')
+    tts_after_message = options.get("tts_after_message", '')
+    tts_mode = options.get("tts_mode", 4)
     # 是否开启语音文字处理程序（默认启用）
-    is_voice = config.get('is_voice', True)
+    is_voice = entry.data.get('is_voice', True)
 
     ################### 系统配置 ###################
 
@@ -60,7 +56,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     api_config.mkdir(hass.config.path("media/ha_cloud_music"))
     mp = MediaPlayer(hass, config, api_config)
     # 是否启用通知（默认启用）
-    mp.is_notify = config.get('is_notify', True)
+    mp.is_notify = options.get('is_notify', True)
     
     mp.api_tts = ApiTTS(mp,{
         'tts_before_message': tts_before_message,
@@ -72,13 +68,18 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     if mp.api_music.api_url == '':
         mp.notify("检测到未配置api_url参数！", "error")
         return
-    # 开始登录    
-    hass.async_create_task(mp.api_music.login())
+
+    def login_callback(uid):
+        # 注册菜单栏
+        hass.components.frontend.async_register_built_in_panel(
+            "iframe", NAME, ICON, DOMAIN,
+            { "url": ROOT_PATH + "/index.html?ver=" + VERSION + "&show_mode=default&uid=" + uid },
+            require_admin=False
+        )
+    # 开始登录
+    hass.async_create_task(mp.api_music.login(login_callback))
     
     hass.data[DOMAIN] = mp
-    # 添加实体
-    add_entities([mp])
-
     ################### 定义实体类 ###################
 
     ################### 注册服务 ################### 
@@ -100,7 +101,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     # 监听语音小助手的文本
     if is_voice == True:
         _ApiVoice = ApiVoice(hass, mp.api_music)
-        hass.bus.async_listen('ha_voice_text_event', _ApiVoice.text_event)
+        hass.bus.async_listen('conversation', _ApiVoice.text_event)
 
     ################### 注册服务 ################### 
 
@@ -109,20 +110,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
 -------------------------------------------------------------------
     ha_cloud_music云音乐插件【作者QQ：635147515】
     
-    版本：''' + VERSION + '''    
-    
-    介绍：这是一个网易云音乐的HomeAssistant播放器插件
-    
-    项目地址：https://github.com/shaonianzhentan/ha_cloud_music
-    
-    配置信息：
-    
-        API_URL：''' +  mp.api_music.api_url + '''
-        
-        显示模式：''' + (show_mode == 'fullscreen' and '全局模式' or '默认模式') + '''
-        
-        用户ID：''' + mp.api_music.uid + '''
-
+    版本：''' + VERSION + '''
 -------------------------------------------------------------------''')
 ################### 注册静态目录与接口网关 ###################
     # 注册静态目录
@@ -131,24 +119,11 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     hass.http.register_static_path('/media-local', hass.config.path("media/ha_cloud_music"), False)
     hass.http.register_static_path(WEB_PATH, hass.config.path("custom_components/ha_cloud_music/local"), False)
     # 注册网关接口
-    hass.http.register_view(ApiView)
-    # 注册菜单栏
-    hass.components.frontend.async_register_built_in_panel(
-        "iframe", NAME, ICON, DOMAIN,
-        { "url": ROOT_PATH + "/index.html?ver=" + VERSION
-        + "&show_mode=" + show_mode
-        + "&uid=" + mp.api_music.uid },
-        require_admin=False
-    )
+    hass.http.register_view(ApiView)    
     # 添加状态卡片
     hass.components.frontend.add_extra_js_url(hass, WEB_PATH + '/card/ha_cloud_music.js?v=' + VERSION)
     ################### 注册静态目录与接口网关 ###################
-    return True   
-
-# 集成安装
-async def async_setup_entry(hass, config_entry, async_add_entities):
-    setup_platform(hass, config_entry.data, async_add_entities)
-    return True
+    async_add_entities([mp], True)
 
 ###################媒体播放器##########################
 class MediaPlayer(MediaPlayerEntity):
@@ -188,7 +163,7 @@ class MediaPlayer(MediaPlayerEntity):
         self._timer_enable = True
         self.is_notify = True
 
-        _sound_mode_list = ['网页播放器']
+        _sound_mode_list = ['网页播放器', 'Windows应用']
             
         mpd_host = config.get('mpd_host', '')
         # 如果是Docker环境，则不显示VLC播放器
@@ -478,7 +453,16 @@ class MediaPlayer(MediaPlayerEntity):
             _LOGGER.error(
                 "不受支持的媒体类型 %s",media_type)
             return
-        self.log('【当前播放音乐】【%s】:【%s】'%(self._media_name, url))
+        # 【搜索替换地址或者163真实地址】【
+        if url is None or media_type == 'music_load' or media_type == 'music_playlist' :
+            # url = await self.api_music.get_song_url(music_info['id'])
+            # if url is None:
+            #     url = await self.api_music.get_music_url(url, music_info['song'], music_info['singer'])
+            music_info = await self.api_music.get_music_real_url(music_info['id'],music_info)
+            url = music_info['url']
+            self.log('【搜索替换地址或者163真实地址】【%s】: %s'%(self._media_name, url))
+                
+        self.log('【当前播放音乐】【%s】: %s'%(self._media_name, url))
 
         # 绑定数据源
         if is_bind_source_list:
@@ -488,12 +472,13 @@ class MediaPlayer(MediaPlayerEntity):
                 source_list.append(str(index + 1) + '.' + music_info['song'] + ' - ' + music_info['singer'])
             self._source_list = source_list
         try:
-            # 如果没有url则下一曲（如果超过3个错误，则停止）
+            
+            # 如果没有url则下一曲（如果超过13个错误，则停止）
             # 如果是云音乐播放列表 并且格式不是mp3不是m4a，则下一曲
-            if url is None or (media_type == 'music_load' and url.find(".mp3") < 0 and url.find(".flac") < 0  and url.find('.m4a') < 0):
+            if url is None or (media_type == 'music_load' and url.find(".mp3") < 0 and url.find('.m4a') < 0 and url.find('.flac') < 0):
                self.notify("没有找到【" + self._media_name + "】的播放链接，自动为您跳到下一首", "error")
                self.error_count = self.error_count + 1
-               if self.error_count < 3:
+               if self.error_count < 13:
                  self.media_next_track()
                return
             else:
@@ -563,9 +548,10 @@ class MediaPlayer(MediaPlayerEntity):
                 print(ex)
                 self._media_player = None
                 self.notify(self._sound_mode + "连接异常", "error")
-
         if sound_mode == '网页播放器':
             self._media_player = MediaPlayerWEB(self._config, self)
+        elif sound_mode == 'Windows应用':
+            self._media_player = MediaPlayerWindows(self._config, self)            
         elif sound_mode == 'MPD播放器':
             # 判断是否配置mpd_host
             if 'mpd_host' not in self._config:
@@ -619,27 +605,25 @@ class MediaPlayer(MediaPlayerEntity):
         self._media_title = music_info['song']
         # 歌手
         self._media_artist = music_info['singer']
-        # 设置图片
+        # 设置图片 ssl 126.net报错
         if 'image' in music_info:
-            self._media_image_url = music_info['image']
+            if music_info['image'] is not None and music_info['image'] != '' :
+                image_url = music_info['image'].replace("https://", "http://")
+                self._media_image_url = image_url
         # 设置专辑名称
         if 'album' in music_info:
             self._media_album_name = music_info['album']
         # 查看是否加入喜欢
         self.favourite = self.api_config.is_love_playlist(_id, _type)
-        if 'duration' in music_info and music_info['duration'] != 0 :
-            self._media_duration = music_info['duration']
+        
         if _type == 'url':
             # 如果传入的是能直接播放的音频
             return music_info['url']
         elif _type == 'djradio' or _type == 'cloud':
             # 如果传入的是网易电台
             url = await self.api_music.get_song_url(_id)
-            return url
-        elif _type == 'qq':                
-            # 如果传入的是QQ音乐
-            url = await self.api_music.get_qq_song_url(music_info['mid'])
-            return url
+            if url is not None and url != '':
+                return url
         elif _type == 'xmly':
             # 喜马拉雅资源
             _url = music_info.get('url', '')
@@ -654,23 +638,7 @@ class MediaPlayer(MediaPlayerEntity):
                 self.notify("该音频只有尊贵的喜马拉雅VIP会员才能收听😂", "error")
             return url
 
-        url = await self.api_music.get_redirect_url(music_info['url'])
-                
-        # 如果传入的是能直接播放的音频
-        #if music_info['url'].startswith('https://music.163.com/song/media/outer/url'):
-            #url = await check_163_song_url(_id, music_info['song'], music_info['singer'], music_info['url'])
-            #self.log("【替换前url为：】:%s", url)
-            #music_info['url'] = url
-            # 如果没有url，则去kuwo搜索
-        if url == None:
-            url = await search_kuwo_music_by_keyword(_id,music_info['song'], music_info['singer'])
-            music_info['url'] = url
-        else:
-            music_info['url'] = url
-        self.log("【替换后url为：】:%s", url)
-        # 如果没有url，则去咪咕搜索
-        if url == None:
-            url = await self.api_music.migu_search(music_info['song'], music_info['singer'])
+        url = await self.api_music.get_music_url(music_info['url'], music_info['song'], music_info['singer'])
         return url
                             
     def music_load(self):
@@ -843,7 +811,7 @@ class MediaPlayer(MediaPlayerEntity):
     
     # 更新实体
     def update_entity(self):
-        time.sleep(1)
+        #time.sleep(1)
         self.call_service('homeassistant', 'update_entity', {'entity_id': 'media_player.yun_yin_le'})
 
     # 通知
