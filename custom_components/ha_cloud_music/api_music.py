@@ -106,43 +106,37 @@ class ApiMusic():
     # 获取163音乐地址，确保获取到了mp3 真实地址.如果收费地址返回搜索的信息
     async def get_music_real_url(self,id,musicInfo):
         try:
-            obj = await self.get("/song/url?id=" + str(id))
-            if obj is not None and obj['data'][0]['url'] != '' and obj['data'][0]['fee'] == 0 :
-                musicInfo['url'] = obj['data'][0]['url']
-                musicInfo['type'] = 'url'
-                return musicInfo
+            # 如果配置了全网音乐搜索，则直接使用.全网搜索会返回可用地址，这里直接id搜索
+            if self.find_api_url != '':
+                obj = await fetch_json(self.find_api_url + "/api/searchById?id=" + str(id))
+                if obj is not None and obj['code'] == 0:
+                    item = obj['data']
+                    source = item['source']
+                    # "id": item['id'], 此处使用旧ID，
+                    play_item = {
+                        "search_source": source,
+                        "id": id,
+                        "name": item['name'],
+                        "album": item['album'],
+                        "image": item['cover'],
+                        "duration": item['duration'],
+                        "url": item['purl'],
+                        "song": item['name'],
+                        "singer": item['singer']
+                    }
+                    # 判断来源是否互联网
+                    if source == 'internet':
+                        play_item['type'] = 'url'
+                        self.log('【全网搜索音乐2】' + item['purl'])
+                    musicInfo = play_item
+                    return musicInfo
             else:
-                # 如果配置了全网音乐搜索，则直接使用
-                if self.find_api_url != '':
-                    # 如果含有特殊字符，则直接使用名称搜索
-                    searchObj = re.search(r'\(|（|：|:《', musicInfo['song'] , re.M|re.I)
-                    if searchObj:
-                        keywords = musicInfo['song'] 
-                    else:
-                        keywords = musicInfo['song']  + ' - '+ musicInfo['singer'] 
-                    obj = await fetch_json(self.find_api_url + "/api/search?key=" + keywords)
-                    if obj is not None and obj['code'] == 0:
-                        item = obj['data']
-                        source = item['source']
-                        # "id": item['id'], 此处使用旧ID，
-                        play_item = {
-                            "search_source": source,
-                            "id": id,
-                            "name": item['name'],
-                            "album": item['album'],
-                            "image": item['cover'],
-                            "duration": item['duration'],
-                            "url": item['purl'],
-                            "song": item['name'],
-                            "singer": item['singer']
-                        }
-                        # 判断来源是否互联网
-                        if source == 'internet':
-                            play_item['type'] = 'url'
-                            self.log('【全网搜索音乐2】' + item['purl'])
-                        musicInfo = play_item
-                        return musicInfo
-                return musicInfo
+                obj = await self.get("/song/url?id=" + str(id))
+                if obj is not None and obj['data'][0]['url'] != '' and obj['data'][0]['fee'] == 0 :
+                    musicInfo['url'] = obj['data'][0]['url']
+                    musicInfo['type'] = 'url'
+                    return musicInfo
+            return musicInfo
         except Exception as e:
             self.log('【获取获取163音乐地址异常】' + id, e)
         return musicInfo
@@ -170,7 +164,7 @@ class ApiMusic():
             if url is not None:
                 res = await fetch_info(url)
                 result_url = res['url']
-                self.log('【获取音乐地址】' + str(url) + '跳转后地址=' + str(result_url))
+                self.log('【获取音乐地址】' + str(url) + '真实地址=' + str(result_url))
         except Exception as e:
             self.log('【获取音乐URL请求网页异常】' + str(url), e)
        
